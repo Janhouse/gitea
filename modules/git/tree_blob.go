@@ -9,9 +9,9 @@ import (
 	"path"
 	"strings"
 
-	"gopkg.in/src-d/go-git.v4/plumbing"
-	"gopkg.in/src-d/go-git.v4/plumbing/filemode"
-	"gopkg.in/src-d/go-git.v4/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 // GetTreeEntryByPath get the tree entries according the sub dir
@@ -23,7 +23,7 @@ func (t *Tree) GetTreeEntryByPath(relpath string) (*TreeEntry, error) {
 			gogitTreeEntry: &object.TreeEntry{
 				Name: "",
 				Mode: filemode.Dir,
-				Hash: plumbing.Hash(t.ID),
+				Hash: t.ID,
 			},
 		}, nil
 	}
@@ -36,6 +36,11 @@ func (t *Tree) GetTreeEntryByPath(relpath string) (*TreeEntry, error) {
 		if i == len(parts)-1 {
 			entries, err := tree.ListEntries()
 			if err != nil {
+				if err == plumbing.ErrObjectNotFound {
+					return nil, ErrNotExist{
+						RelPath: relpath,
+					}
+				}
 				return nil, err
 			}
 			for _, v := range entries {
@@ -46,6 +51,11 @@ func (t *Tree) GetTreeEntryByPath(relpath string) (*TreeEntry, error) {
 		} else {
 			tree, err = tree.SubTree(name)
 			if err != nil {
+				if err == plumbing.ErrObjectNotFound {
+					return nil, ErrNotExist{
+						RelPath: relpath,
+					}
+				}
 				return nil, err
 			}
 		}
@@ -60,7 +70,7 @@ func (t *Tree) GetBlobByPath(relpath string) (*Blob, error) {
 		return nil, err
 	}
 
-	if !entry.IsDir() {
+	if !entry.IsDir() && !entry.IsSubModule() {
 		return entry.Blob(), nil
 	}
 

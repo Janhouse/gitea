@@ -9,23 +9,32 @@ import (
 	"fmt"
 	"path"
 	"strings"
-
-	"golang.org/x/net/html/charset"
-	"golang.org/x/text/transform"
+	"time"
 
 	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/base"
+	"code.gitea.io/gitea/modules/charset"
 	"code.gitea.io/gitea/modules/git"
 	"code.gitea.io/gitea/modules/lfs"
 	"code.gitea.io/gitea/modules/log"
+	repo_module "code.gitea.io/gitea/modules/repository"
 	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/sdk/gitea"
+	"code.gitea.io/gitea/modules/storage"
+	"code.gitea.io/gitea/modules/structs"
+
+	stdcharset "golang.org/x/net/html/charset"
+	"golang.org/x/text/transform"
 )
 
 // IdentityOptions for a person's identity like an author or committer
 type IdentityOptions struct {
 	Name  string
 	Email string
+}
+
+// CommitDateOptions store dates for GIT_AUTHOR_DATE and GIT_COMMITTER_DATE
+type CommitDateOptions struct {
+	Author    time.Time
+	Committer time.Time
 }
 
 // UpdateRepoFileOptions holds the repository file update options
@@ -41,6 +50,7 @@ type UpdateRepoFileOptions struct {
 	IsNewFile    bool
 	Author       *IdentityOptions
 	Committer    *IdentityOptions
+	Dates        *CommitDateOptions
 }
 
 func detectEncodingAndBOM(entry *git.TreeEntry, repo *models.Repository) (string, bool) {
@@ -85,31 +95,35 @@ func detectEncodingAndBOM(entry *git.TreeEntry, repo *models.Repository) (string
 
 	}
 
-	encoding, err := base.DetectEncoding(buf)
+	encoding, err := charset.DetectEncoding(buf)
 	if err != nil {
 		// just default to utf-8 and no bom
 		return "UTF-8", false
 	}
 	if encoding == "UTF-8" {
-		return encoding, bytes.Equal(buf[0:3], base.UTF8BOM)
+		return encoding, bytes.Equal(buf[0:3], charset.UTF8BOM)
 	}
-	charsetEncoding, _ := charset.Lookup(encoding)
+	charsetEncoding, _ := stdcharset.Lookup(encoding)
 	if charsetEncoding == nil {
 		return "UTF-8", false
 	}
 
 	result, n, err := transform.String(charsetEncoding.NewDecoder(), string(buf))
+	if err != nil {
+		// return default
+		return "UTF-8", false
+	}
 
 	if n > 2 {
-		return encoding, bytes.Equal([]byte(result)[0:3], base.UTF8BOM)
+		return encoding, bytes.Equal([]byte(result)[0:3], charset.UTF8BOM)
 	}
 
 	return encoding, false
 }
 
 // CreateOrUpdateRepoFile adds or updates a file in the given repository
-func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *UpdateRepoFileOptions) (*gitea.FileResponse, error) {
-	// If no branch name is set, assume master
+func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *UpdateRepoFileOptions) (*structs.FileResponse, error) {
+	// If no branch name is set, assume default branch
 	if opts.OldBranch == "" {
 		opts.OldBranch = repo.DefaultBranch
 	}
@@ -118,7 +132,7 @@ func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *Up
 	}
 
 	// oldBranch must exist for this operation
-	if _, err := repo.GetBranch(opts.OldBranch); err != nil {
+	if _, err := repo_module.GetBranch(repo, opts.OldBranch); err != nil {
 		return nil, err
 	}
 
@@ -126,7 +140,7 @@ func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *Up
 	// Check to make sure the branch does not already exist, otherwise we can't proceed.
 	// If we aren't branching to a new branch, make sure user can commit to the given branch
 	if opts.NewBranch != opts.OldBranch {
-		existingBranch, err := repo.GetBranch(opts.NewBranch)
+		existingBranch, err := repo_module.GetBranch(repo, opts.NewBranch)
 		if existingBranch != nil {
 			return nil, models.ErrBranchAlreadyExists{
 				BranchName: opts.NewBranch,
@@ -136,8 +150,35 @@ func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *Up
 			return nil, err
 		}
 	} else {
-		if protected, _ := repo.IsProtectedBranchForPush(opts.OldBranch, doer); protected {
-			return nil, models.ErrUserCannotCommit{UserName: doer.LowerName}
+		protectedBranch, err := repo.GetBranchProtection(opts.OldBranch)
+		if err != nil {
+			return nil, err
+		}
+		if protectedBranch != nil {
+			if !protectedBranch.CanUserPush(doer.ID) {
+				return nil, models.ErrUserCannotCommit{
+					UserName: doer.LowerName,
+				}
+			}
+			if protectedBranch.RequireSignedCommits {
+				_, _, _, err := repo.SignCRUDAction(doer, repo.RepoPath(), opts.OldBranch)
+				if err != nil {
+					if !models.IsErrWontSign(err) {
+						return nil, err
+					}
+					return nil, models.ErrUserCannotCommit{
+						UserName: doer.LowerName,
+					}
+				}
+			}
+			patterns := protectedBranch.GetProtectedFilePatterns()
+			for _, pat := range patterns {
+				if pat.Match(strings.ToLower(opts.TreePath)) {
+					return nil, models.ErrFilePathProtected{
+						Path: opts.TreePath,
+					}
+				}
+			}
 		}
 	}
 
@@ -163,13 +204,13 @@ func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *Up
 
 	message := strings.TrimSpace(opts.Message)
 
-	author, committer := GetAuthorAndCommitterUsers(opts.Committer, opts.Author, doer)
+	author, committer := GetAuthorAndCommitterUsers(opts.Author, opts.Committer, doer)
 
 	t, err := NewTemporaryUploadRepository(repo)
-	defer t.Close()
 	if err != nil {
-		return nil, err
+		log.Error("%v", err)
 	}
+	defer t.Close()
 	if err := t.Clone(opts.OldBranch); err != nil {
 		return nil, err
 	}
@@ -186,10 +227,18 @@ func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *Up
 	// Assigned LastCommitID in opts if it hasn't been set
 	if opts.LastCommitID == "" {
 		opts.LastCommitID = commit.ID.String()
+	} else {
+		lastCommitID, err := t.gitRepo.ConvertToSHA1(opts.LastCommitID)
+		if err != nil {
+			return nil, fmt.Errorf("DeleteRepoFile: Invalid last commit ID: %v", err)
+		}
+		opts.LastCommitID = lastCommitID.String()
+
 	}
 
 	encoding := "UTF-8"
 	bom := false
+	executable := false
 
 	if !opts.IsNewFile {
 		fromEntry, err := commit.GetTreeEntryByPath(fromTreePath)
@@ -225,6 +274,7 @@ func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *Up
 			return nil, models.ErrSHAOrCommitIDNotProvided{}
 		}
 		encoding, bom = detectEncodingAndBOM(fromEntry, repo)
+		executable = fromEntry.IsExecutable()
 	}
 
 	// For the path where this file will be created/updated, we need to make
@@ -302,20 +352,14 @@ func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *Up
 		}
 	}
 
-	// Check there is no way this can return multiple infos
-	filename2attribute2info, err := t.CheckAttribute("filter", treePath)
-	if err != nil {
-		return nil, err
-	}
-
 	content := opts.Content
 	if bom {
-		content = string(base.UTF8BOM) + content
+		content = string(charset.UTF8BOM) + content
 	}
 	if encoding != "UTF-8" {
-		charsetEncoding, _ := charset.Lookup(encoding)
+		charsetEncoding, _ := stdcharset.Lookup(encoding)
 		if charsetEncoding != nil {
-			result, _, err := transform.String(charsetEncoding.NewEncoder(), string(content))
+			result, _, err := transform.String(charsetEncoding.NewEncoder(), content)
 			if err != nil {
 				// Look if we can't encode back in to the original we should just stick with utf-8
 				log.Error("Error re-encoding %s (%s) as %s - will stay as UTF-8: %v", opts.TreePath, opts.FromTreePath, encoding, err)
@@ -330,16 +374,23 @@ func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *Up
 	opts.Content = content
 	var lfsMetaObject *models.LFSMetaObject
 
-	if setting.LFS.StartServer && filename2attribute2info[treePath] != nil && filename2attribute2info[treePath]["filter"] == "lfs" {
-		// OK so we are supposed to LFS this data!
-		oid, err := models.GenerateLFSOid(strings.NewReader(opts.Content))
+	if setting.LFS.StartServer {
+		// Check there is no way this can return multiple infos
+		filename2attribute2info, err := t.CheckAttribute("filter", treePath)
 		if err != nil {
 			return nil, err
 		}
-		lfsMetaObject = &models.LFSMetaObject{Oid: oid, Size: int64(len(opts.Content)), RepositoryID: repo.ID}
-		content = lfsMetaObject.Pointer()
-	}
 
+		if filename2attribute2info[treePath] != nil && filename2attribute2info[treePath]["filter"] == "lfs" {
+			// OK so we are supposed to LFS this data!
+			oid, err := models.GenerateLFSOid(strings.NewReader(opts.Content))
+			if err != nil {
+				return nil, err
+			}
+			lfsMetaObject = &models.LFSMetaObject{Oid: oid, Size: int64(len(opts.Content)), RepositoryID: repo.ID}
+			content = lfsMetaObject.Pointer()
+		}
+	}
 	// Add the object to the database
 	objectHash, err := t.HashObject(strings.NewReader(content))
 	if err != nil {
@@ -347,8 +398,14 @@ func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *Up
 	}
 
 	// Add the object to the index
-	if err := t.AddObjectToIndex("100644", objectHash, treePath); err != nil {
-		return nil, err
+	if executable {
+		if err := t.AddObjectToIndex("100755", objectHash, treePath); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := t.AddObjectToIndex("100644", objectHash, treePath); err != nil {
+			return nil, err
+		}
 	}
 
 	// Now write the tree
@@ -358,7 +415,12 @@ func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *Up
 	}
 
 	// Now commit the tree
-	commitHash, err := t.CommitTree(author, committer, treeHash, message)
+	var commitHash string
+	if opts.Dates != nil {
+		commitHash, err = t.CommitTreeWithDate(author, committer, treeHash, message, opts.Dates.Author, opts.Dates.Committer)
+	} else {
+		commitHash, err = t.CommitTree(author, committer, treeHash, message)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -369,10 +431,14 @@ func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *Up
 		if err != nil {
 			return nil, err
 		}
-		contentStore := &lfs.ContentStore{BasePath: setting.LFS.ContentPath}
-		if !contentStore.Exists(lfsMetaObject) {
+		contentStore := &lfs.ContentStore{ObjectStorage: storage.LFS}
+		exist, err := contentStore.Exists(lfsMetaObject)
+		if err != nil {
+			return nil, err
+		}
+		if !exist {
 			if err := contentStore.Put(lfsMetaObject, strings.NewReader(opts.Content)); err != nil {
-				if err2 := repo.RemoveLFSMetaObjectByOid(lfsMetaObject.Oid); err2 != nil {
+				if _, err2 := repo.RemoveLFSMetaObjectByOid(lfsMetaObject.Oid); err2 != nil {
 					return nil, fmt.Errorf("Error whilst removing failed inserted LFS object %s: %v (Prev Error: %v)", lfsMetaObject.Oid, err2, err)
 				}
 				return nil, err
@@ -382,34 +448,9 @@ func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *Up
 
 	// Then push this tree to NewBranch
 	if err := t.Push(doer, commitHash, opts.NewBranch); err != nil {
+		log.Error("%T %v", err, err)
 		return nil, err
 	}
-
-	// Simulate push event.
-	oldCommitID := opts.LastCommitID
-	if opts.NewBranch != opts.OldBranch || oldCommitID == "" {
-		oldCommitID = git.EmptySHA
-	}
-
-	if err = repo.GetOwner(); err != nil {
-		return nil, fmt.Errorf("GetOwner: %v", err)
-	}
-	err = models.PushUpdate(
-		opts.NewBranch,
-		models.PushUpdateOptions{
-			PusherID:     doer.ID,
-			PusherName:   doer.Name,
-			RepoUserName: repo.Owner.Name,
-			RepoName:     repo.Name,
-			RefFullName:  git.BranchPrefix + opts.NewBranch,
-			OldCommitID:  oldCommitID,
-			NewCommitID:  commitHash,
-		},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("PushUpdate: %v", err)
-	}
-	models.UpdateRepoIndexer(repo)
 
 	commit, err = t.GetCommit(commitHash)
 	if err != nil {

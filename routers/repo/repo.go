@@ -1,4 +1,5 @@
 // Copyright 2014 The Gogs Authors. All rights reserved.
+// Copyright 2020 The Gitea Authors. All rights reserved.
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file.
 
@@ -17,14 +18,14 @@ import (
 	"code.gitea.io/gitea/modules/git"
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/util"
+	repo_service "code.gitea.io/gitea/services/repository"
 
-	"github.com/Unknwon/com"
+	"github.com/unknwon/com"
 )
 
 const (
-	tplCreate  base.TplName = "repo/create"
-	tplMigrate base.TplName = "repo/migrate"
+	tplCreate       base.TplName = "repo/create"
+	tplAlertDetails base.TplName = "base/alert_details"
 )
 
 // MustBeNotEmpty render when a repo is a empty git dir
@@ -50,12 +51,23 @@ func MustBeAbleToUpload(ctx *context.Context) {
 }
 
 func checkContextUser(ctx *context.Context, uid int64) *models.User {
-	orgs, err := models.GetOwnedOrgsByUserIDDesc(ctx.User.ID, "updated_unix")
+	orgs, err := models.GetOrgsCanCreateRepoByUserID(ctx.User.ID)
 	if err != nil {
-		ctx.ServerError("GetOwnedOrgsByUserIDDesc", err)
+		ctx.ServerError("GetOrgsCanCreateRepoByUserID", err)
 		return nil
 	}
-	ctx.Data["Orgs"] = orgs
+
+	if !ctx.User.IsAdmin {
+		orgsAvailable := []*models.User{}
+		for i := 0; i < len(orgs); i++ {
+			if orgs[i].CanCreateRepo() {
+				orgsAvailable = append(orgsAvailable, orgs[i])
+			}
+		}
+		ctx.Data["Orgs"] = orgsAvailable
+	} else {
+		ctx.Data["Orgs"] = orgs
+	}
 
 	// Not equal means current user is an organization.
 	if uid == ctx.User.ID || uid == 0 {
@@ -78,14 +90,16 @@ func checkContextUser(ctx *context.Context, uid int64) *models.User {
 		return nil
 	}
 	if !ctx.User.IsAdmin {
-		isOwner, err := org.IsOwnedBy(ctx.User.ID)
+		canCreate, err := org.CanCreateOrgRepo(ctx.User.ID)
 		if err != nil {
-			ctx.ServerError("IsOwnedBy", err)
+			ctx.ServerError("CanCreateOrgRepo", err)
 			return nil
-		} else if !isOwner {
+		} else if !canCreate {
 			ctx.Error(403)
 			return nil
 		}
+	} else {
+		ctx.Data["Orgs"] = orgs
 	}
 	return org
 }
@@ -105,19 +119,17 @@ func getRepoPrivate(ctx *context.Context) bool {
 
 // Create render creating repository page
 func Create(ctx *context.Context) {
-	if !ctx.User.CanCreateRepo() {
-		ctx.RenderWithErr(ctx.Tr("repo.form.reach_limit_of_creation", ctx.User.MaxCreationLimit()), tplCreate, nil)
-	}
-
 	ctx.Data["Title"] = ctx.Tr("new_repo")
 
 	// Give default value for template to render.
 	ctx.Data["Gitignores"] = models.Gitignores
+	ctx.Data["LabelTemplates"] = models.LabelTemplates
 	ctx.Data["Licenses"] = models.Licenses
 	ctx.Data["Readmes"] = models.Readmes
 	ctx.Data["readme"] = "Default"
 	ctx.Data["private"] = getRepoPrivate(ctx)
 	ctx.Data["IsForcedPrivate"] = setting.Repository.ForcePrivate
+	ctx.Data["default_branch"] = setting.Repository.DefaultBranch
 
 	ctxUser := checkContextUser(ctx, ctx.QueryInt64("org"))
 	if ctx.Written() {
@@ -125,7 +137,21 @@ func Create(ctx *context.Context) {
 	}
 	ctx.Data["ContextUser"] = ctxUser
 
-	ctx.HTML(200, tplCreate)
+	ctx.Data["repo_template_name"] = ctx.Tr("repo.template_select")
+	templateID := ctx.QueryInt64("template_id")
+	if templateID > 0 {
+		templateRepo, err := models.GetRepositoryByID(templateID)
+		if err == nil && templateRepo.CheckUnitUser(ctxUser, models.UnitTypeCode) {
+			ctx.Data["repo_template"] = templateID
+			ctx.Data["repo_template_name"] = templateRepo.Name
+		}
+	}
+
+	if !ctx.User.CanCreateRepo() {
+		ctx.RenderWithErr(ctx.Tr("repo.form.reach_limit_of_creation", ctx.User.MaxCreationLimit()), tplCreate, nil)
+	} else {
+		ctx.HTML(200, tplCreate)
+	}
 }
 
 func handleCreateError(ctx *context.Context, owner *models.User, err error, name string, tpl base.TplName, form interface{}) {
@@ -135,6 +161,18 @@ func handleCreateError(ctx *context.Context, owner *models.User, err error, name
 	case models.IsErrRepoAlreadyExist(err):
 		ctx.Data["Err_RepoName"] = true
 		ctx.RenderWithErr(ctx.Tr("form.repo_name_been_taken"), tpl, form)
+	case models.IsErrRepoFilesAlreadyExist(err):
+		ctx.Data["Err_RepoName"] = true
+		switch {
+		case ctx.IsUserSiteAdmin() || (setting.Repository.AllowAdoptionOfUnadoptedRepositories && setting.Repository.AllowDeleteOfUnadoptedRepositories):
+			ctx.RenderWithErr(ctx.Tr("form.repository_files_already_exist.adopt_or_delete"), tpl, form)
+		case setting.Repository.AllowAdoptionOfUnadoptedRepositories:
+			ctx.RenderWithErr(ctx.Tr("form.repository_files_already_exist.adopt"), tpl, form)
+		case setting.Repository.AllowDeleteOfUnadoptedRepositories:
+			ctx.RenderWithErr(ctx.Tr("form.repository_files_already_exist.delete"), tpl, form)
+		default:
+			ctx.RenderWithErr(ctx.Tr("form.repository_files_already_exist"), tpl, form)
+		}
 	case models.IsErrNameReserved(err):
 		ctx.Data["Err_RepoName"] = true
 		ctx.RenderWithErr(ctx.Tr("repo.form.name_reserved", err.(models.ErrNameReserved).Name), tpl, form)
@@ -151,6 +189,7 @@ func CreatePost(ctx *context.Context, form auth.CreateRepoForm) {
 	ctx.Data["Title"] = ctx.Tr("new_repo")
 
 	ctx.Data["Gitignores"] = models.Gitignores
+	ctx.Data["LabelTemplates"] = models.LabelTemplates
 	ctx.Data["Licenses"] = models.Licenses
 	ctx.Data["Readmes"] = models.Readmes
 
@@ -165,122 +204,64 @@ func CreatePost(ctx *context.Context, form auth.CreateRepoForm) {
 		return
 	}
 
-	repo, err := models.CreateRepository(ctx.User, ctxUser, models.CreateRepoOptions{
-		Name:        form.RepoName,
-		Description: form.Description,
-		Gitignores:  form.Gitignores,
-		License:     form.License,
-		Readme:      form.Readme,
-		IsPrivate:   form.Private || setting.Repository.ForcePrivate,
-		AutoInit:    form.AutoInit,
-	})
-	if err == nil {
-		log.Trace("Repository created [%d]: %s/%s", repo.ID, ctxUser.Name, repo.Name)
-		ctx.Redirect(setting.AppSubURL + "/" + ctxUser.Name + "/" + repo.Name)
-		return
-	}
+	var repo *models.Repository
+	var err error
+	if form.RepoTemplate > 0 {
+		opts := models.GenerateRepoOptions{
+			Name:        form.RepoName,
+			Description: form.Description,
+			Private:     form.Private,
+			GitContent:  form.GitContent,
+			Topics:      form.Topics,
+			GitHooks:    form.GitHooks,
+			Webhooks:    form.Webhooks,
+			Avatar:      form.Avatar,
+			IssueLabels: form.Labels,
+		}
 
-	if repo != nil {
-		if errDelete := models.DeleteRepository(ctx.User, ctxUser.ID, repo.ID); errDelete != nil {
-			log.Error("DeleteRepository: %v", errDelete)
+		if !opts.IsValid() {
+			ctx.RenderWithErr(ctx.Tr("repo.template.one_item"), tplCreate, form)
+			return
+		}
+
+		templateRepo := getRepository(ctx, form.RepoTemplate)
+		if ctx.Written() {
+			return
+		}
+
+		if !templateRepo.IsTemplate {
+			ctx.RenderWithErr(ctx.Tr("repo.template.invalid"), tplCreate, form)
+			return
+		}
+
+		repo, err = repo_service.GenerateRepository(ctx.User, ctxUser, templateRepo, opts)
+		if err == nil {
+			log.Trace("Repository generated [%d]: %s/%s", repo.ID, ctxUser.Name, repo.Name)
+			ctx.Redirect(setting.AppSubURL + "/" + ctxUser.Name + "/" + repo.Name)
+			return
+		}
+	} else {
+		repo, err = repo_service.CreateRepository(ctx.User, ctxUser, models.CreateRepoOptions{
+			Name:          form.RepoName,
+			Description:   form.Description,
+			Gitignores:    form.Gitignores,
+			IssueLabels:   form.IssueLabels,
+			License:       form.License,
+			Readme:        form.Readme,
+			IsPrivate:     form.Private || setting.Repository.ForcePrivate,
+			DefaultBranch: form.DefaultBranch,
+			AutoInit:      form.AutoInit,
+			IsTemplate:    form.Template,
+			TrustModel:    models.ToTrustModel(form.TrustModel),
+		})
+		if err == nil {
+			log.Trace("Repository created [%d]: %s/%s", repo.ID, ctxUser.Name, repo.Name)
+			ctx.Redirect(setting.AppSubURL + "/" + ctxUser.Name + "/" + repo.Name)
+			return
 		}
 	}
 
 	handleCreateError(ctx, ctxUser, err, "CreatePost", tplCreate, &form)
-}
-
-// Migrate render migration of repository page
-func Migrate(ctx *context.Context) {
-	ctx.Data["Title"] = ctx.Tr("new_migrate")
-	ctx.Data["private"] = getRepoPrivate(ctx)
-	ctx.Data["IsForcedPrivate"] = setting.Repository.ForcePrivate
-	ctx.Data["mirror"] = ctx.Query("mirror") == "1"
-	ctx.Data["LFSActive"] = setting.LFS.StartServer
-
-	ctxUser := checkContextUser(ctx, ctx.QueryInt64("org"))
-	if ctx.Written() {
-		return
-	}
-	ctx.Data["ContextUser"] = ctxUser
-
-	ctx.HTML(200, tplMigrate)
-}
-
-// MigratePost response for migrating from external git repository
-func MigratePost(ctx *context.Context, form auth.MigrateRepoForm) {
-	ctx.Data["Title"] = ctx.Tr("new_migrate")
-
-	ctxUser := checkContextUser(ctx, form.UID)
-	if ctx.Written() {
-		return
-	}
-	ctx.Data["ContextUser"] = ctxUser
-
-	if ctx.HasError() {
-		ctx.HTML(200, tplMigrate)
-		return
-	}
-
-	remoteAddr, err := form.ParseRemoteAddr(ctx.User)
-	if err != nil {
-		if models.IsErrInvalidCloneAddr(err) {
-			ctx.Data["Err_CloneAddr"] = true
-			addrErr := err.(models.ErrInvalidCloneAddr)
-			switch {
-			case addrErr.IsURLError:
-				ctx.RenderWithErr(ctx.Tr("form.url_error"), tplMigrate, &form)
-			case addrErr.IsPermissionDenied:
-				ctx.RenderWithErr(ctx.Tr("repo.migrate.permission_denied"), tplMigrate, &form)
-			case addrErr.IsInvalidPath:
-				ctx.RenderWithErr(ctx.Tr("repo.migrate.invalid_local_path"), tplMigrate, &form)
-			default:
-				ctx.ServerError("Unknown error", err)
-			}
-		} else {
-			ctx.ServerError("ParseRemoteAddr", err)
-		}
-		return
-	}
-
-	repo, err := models.MigrateRepository(ctx.User, ctxUser, models.MigrateRepoOptions{
-		Name:        form.RepoName,
-		Description: form.Description,
-		IsPrivate:   form.Private || setting.Repository.ForcePrivate,
-		IsMirror:    form.Mirror,
-		RemoteAddr:  remoteAddr,
-	})
-	if err == nil {
-		log.Trace("Repository migrated [%d]: %s/%s", repo.ID, ctxUser.Name, form.RepoName)
-		ctx.Redirect(setting.AppSubURL + "/" + ctxUser.Name + "/" + form.RepoName)
-		return
-	}
-
-	if models.IsErrRepoAlreadyExist(err) {
-		ctx.RenderWithErr(ctx.Tr("form.repo_name_been_taken"), tplMigrate, &form)
-		return
-	}
-
-	// remoteAddr may contain credentials, so we sanitize it
-	err = util.URLSanitizedError(err, remoteAddr)
-
-	if repo != nil {
-		if errDelete := models.DeleteRepository(ctx.User, ctxUser.ID, repo.ID); errDelete != nil {
-			log.Error("DeleteRepository: %v", errDelete)
-		}
-	}
-
-	if strings.Contains(err.Error(), "Authentication failed") ||
-		strings.Contains(err.Error(), "could not read Username") {
-		ctx.Data["Err_Auth"] = true
-		ctx.RenderWithErr(ctx.Tr("form.auth_failed", err.Error()), tplMigrate, &form)
-		return
-	} else if strings.Contains(err.Error(), "fatal:") {
-		ctx.Data["Err_CloneAddr"] = true
-		ctx.RenderWithErr(ctx.Tr("repo.migrate.failed", err.Error()), tplMigrate, &form)
-		return
-	}
-
-	handleCreateError(ctx, ctxUser, err, "MigratePost", tplMigrate, &form)
 }
 
 // Action response for actions to a repository
@@ -322,7 +303,7 @@ func RedirectDownload(ctx *context.Context) {
 	)
 	tagNames := []string{vTag}
 	curRepo := ctx.Repo.Repository
-	releases, err := models.GetReleasesByRepoIDAndNames(curRepo.ID, tagNames)
+	releases, err := models.GetReleasesByRepoIDAndNames(models.DefaultDBContext(), curRepo.ID, tagNames)
 	if err != nil {
 		if models.IsErrAttachmentNotExist(err) {
 			ctx.Error(404)
@@ -339,7 +320,7 @@ func RedirectDownload(ctx *context.Context) {
 			return
 		}
 		if att != nil {
-			ctx.Redirect(setting.AppSubURL + "/attachments/" + att.UUID)
+			ctx.Redirect(att.DownloadURL())
 			return
 		}
 	}
@@ -410,7 +391,10 @@ func Download(ctx *context.Context) {
 
 	archivePath = path.Join(archivePath, base.ShortSha(commit.ID.String())+ext)
 	if !com.IsFile(archivePath) {
-		if err := commit.CreateArchive(archivePath, archiveType); err != nil {
+		if err := commit.CreateArchive(ctx.Req.Context(), archivePath, git.CreateArchiveOpts{
+			Format: archiveType,
+			Prefix: setting.Repository.PrefixArchiveFiles,
+		}); err != nil {
 			ctx.ServerError("Download -> CreateArchive "+archivePath, err)
 			return
 		}

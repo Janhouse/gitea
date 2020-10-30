@@ -5,23 +5,24 @@
 package cmd
 
 import (
-	"crypto/tls"
+	"context"
 	"fmt"
 	"net"
 	"net/http"
-	"net/http/fcgi"
 	_ "net/http/pprof" // Used for debugging if enabled and a web server is running
 	"os"
 	"strings"
 
+	"code.gitea.io/gitea/modules/graceful"
 	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/markup/external"
 	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/routers"
 	"code.gitea.io/gitea/routers/routes"
 
-	"github.com/Unknwon/com"
+	"gitea.com/macaron/macaron"
+
 	context2 "github.com/gorilla/context"
+	"github.com/unknwon/com"
 	"github.com/urfave/cli"
 	"golang.org/x/crypto/acme/autocert"
 	ini "gopkg.in/ini.v1"
@@ -42,7 +43,7 @@ and it takes care of all the other things for you`,
 		},
 		cli.StringFlag{
 			Name:  "pid, P",
-			Value: "/var/run/gitea.pid",
+			Value: setting.PIDFile,
 			Usage: "Custom pid file path",
 		},
 	},
@@ -61,7 +62,7 @@ func runHTTPRedirector() {
 		http.Redirect(w, r, target, http.StatusTemporaryRedirect)
 	})
 
-	var err = runHTTP(source, context2.ClearHandler(handler))
+	var err = runHTTP("tcp", source, context2.ClearHandler(handler))
 
 	if err != nil {
 		log.Fatal("Failed to start port redirection: %v", err)
@@ -77,19 +78,13 @@ func runLetsEncrypt(listenAddr, domain, directory, email string, m http.Handler)
 	}
 	go func() {
 		log.Info("Running Let's Encrypt handler on %s", setting.HTTPAddr+":"+setting.PortToRedirect)
-		var err = http.ListenAndServe(setting.HTTPAddr+":"+setting.PortToRedirect, certManager.HTTPHandler(http.HandlerFunc(runLetsEncryptFallbackHandler))) // all traffic coming into HTTP will be redirect to HTTPS automatically (LE HTTP-01 validation happens here)
+		// all traffic coming into HTTP will be redirect to HTTPS automatically (LE HTTP-01 validation happens here)
+		var err = runHTTP("tcp", setting.HTTPAddr+":"+setting.PortToRedirect, certManager.HTTPHandler(http.HandlerFunc(runLetsEncryptFallbackHandler)))
 		if err != nil {
 			log.Fatal("Failed to start the Let's Encrypt handler on port %s: %v", setting.PortToRedirect, err)
 		}
 	}()
-	server := &http.Server{
-		Addr:    listenAddr,
-		Handler: m,
-		TLSConfig: &tls.Config{
-			GetCertificate: certManager.GetCertificate,
-		},
-	}
-	return server.ListenAndServeTLS("", "")
+	return runHTTPSWithTLSConfig("tcp", listenAddr, certManager.TLSConfig(), context2.ClearHandler(m))
 }
 
 func runLetsEncryptFallbackHandler(w http.ResponseWriter, r *http.Request) {
@@ -100,64 +95,50 @@ func runLetsEncryptFallbackHandler(w http.ResponseWriter, r *http.Request) {
 	// Remove the trailing slash at the end of setting.AppURL, the request
 	// URI always contains a leading slash, which would result in a double
 	// slash
-	target := strings.TrimRight(setting.AppURL, "/") + r.URL.RequestURI()
+	target := strings.TrimSuffix(setting.AppURL, "/") + r.URL.RequestURI()
 	http.Redirect(w, r, target, http.StatusFound)
 }
 
 func runWeb(ctx *cli.Context) error {
-	if ctx.IsSet("pid") {
-		setting.CustomPID = ctx.String("pid")
+	managerCtx, cancel := context.WithCancel(context.Background())
+	graceful.InitManager(managerCtx)
+	defer cancel()
+
+	if os.Getppid() > 1 && len(os.Getenv("LISTEN_FDS")) > 0 {
+		log.Info("Restarting Gitea on PID: %d from parent PID: %d", os.Getpid(), os.Getppid())
+	} else {
+		log.Info("Starting Gitea on PID: %d", os.Getpid())
 	}
 
-	routers.GlobalInit()
-
-	external.RegisterParsers()
-
-	m := routes.NewMacaron()
-	routes.RegisterRoutes(m)
+	// Set pid file setting
+	if ctx.IsSet("pid") {
+		setting.PIDFile = ctx.String("pid")
+		setting.WritePIDFile = true
+	}
 
 	// Flag for port number in case first time run conflict.
 	if ctx.IsSet("port") {
-		setting.AppURL = strings.Replace(setting.AppURL, setting.HTTPPort, ctx.String("port"), 1)
-		setting.HTTPPort = ctx.String("port")
-
-		switch setting.Protocol {
-		case setting.UnixSocket:
-		case setting.FCGI:
-		default:
-			// Save LOCAL_ROOT_URL if port changed
-			cfg := ini.Empty()
-			if com.IsFile(setting.CustomConf) {
-				// Keeps custom settings if there is already something.
-				if err := cfg.Append(setting.CustomConf); err != nil {
-					return fmt.Errorf("Failed to load custom conf '%s': %v", setting.CustomConf, err)
-				}
-			}
-
-			defaultLocalURL := string(setting.Protocol) + "://"
-			if setting.HTTPAddr == "0.0.0.0" {
-				defaultLocalURL += "localhost"
-			} else {
-				defaultLocalURL += setting.HTTPAddr
-			}
-			defaultLocalURL += ":" + setting.HTTPPort + "/"
-
-			cfg.Section("server").Key("LOCAL_ROOT_URL").SetValue(defaultLocalURL)
-
-			if err := cfg.SaveTo(setting.CustomConf); err != nil {
-				return fmt.Errorf("Error saving generated JWT Secret to custom config: %v", err)
-			}
+		if err := setPort(ctx.String("port")); err != nil {
+			return err
 		}
 	}
 
-	listenAddr := setting.HTTPAddr
-	if setting.Protocol != setting.UnixSocket {
-		listenAddr += ":" + setting.HTTPPort
-	}
-	log.Info("Listen: %v://%s%s", setting.Protocol, listenAddr, setting.AppSubURL)
-
-	if setting.LFS.StartServer {
-		log.Info("LFS server enabled")
+	// Perform pre-initialization
+	needsInstall := routers.PreInstallInit(graceful.GetManager().HammerContext())
+	if needsInstall {
+		m := routes.NewMacaron()
+		routes.RegisterInstallRoute(m)
+		err := listen(m, false)
+		select {
+		case <-graceful.GetManager().IsShutdown():
+			<-graceful.GetManager().Done()
+			log.Info("PID: %d Gitea Web Finished", os.Getpid())
+			log.Close()
+			return err
+		default:
+		}
+	} else {
+		NoInstallListener()
 	}
 
 	if setting.EnablePprof {
@@ -167,49 +148,109 @@ func runWeb(ctx *cli.Context) error {
 		}()
 	}
 
+	log.Info("Global init")
+	// Perform global initialization
+	routers.GlobalInit(graceful.GetManager().HammerContext())
+
+	// Set up Macaron
+	m := routes.NewMacaron()
+	routes.RegisterRoutes(m)
+
+	err := listen(m, true)
+	<-graceful.GetManager().Done()
+	log.Info("PID: %d Gitea Web Finished", os.Getpid())
+	log.Close()
+	return err
+}
+
+func setPort(port string) error {
+	setting.AppURL = strings.Replace(setting.AppURL, setting.HTTPPort, port, 1)
+	setting.HTTPPort = port
+
+	switch setting.Protocol {
+	case setting.UnixSocket:
+	case setting.FCGI:
+	case setting.FCGIUnix:
+	default:
+		// Save LOCAL_ROOT_URL if port changed
+		cfg := ini.Empty()
+		if com.IsFile(setting.CustomConf) {
+			// Keeps custom settings if there is already something.
+			if err := cfg.Append(setting.CustomConf); err != nil {
+				return fmt.Errorf("Failed to load custom conf '%s': %v", setting.CustomConf, err)
+			}
+		}
+
+		defaultLocalURL := string(setting.Protocol) + "://"
+		if setting.HTTPAddr == "0.0.0.0" {
+			defaultLocalURL += "localhost"
+		} else {
+			defaultLocalURL += setting.HTTPAddr
+		}
+		defaultLocalURL += ":" + setting.HTTPPort + "/"
+
+		cfg.Section("server").Key("LOCAL_ROOT_URL").SetValue(defaultLocalURL)
+
+		if err := cfg.SaveTo(setting.CustomConf); err != nil {
+			return fmt.Errorf("Error saving generated JWT Secret to custom config: %v", err)
+		}
+	}
+	return nil
+}
+
+func listen(m *macaron.Macaron, handleRedirector bool) error {
+	listenAddr := setting.HTTPAddr
+	if setting.Protocol != setting.UnixSocket && setting.Protocol != setting.FCGIUnix {
+		listenAddr = net.JoinHostPort(listenAddr, setting.HTTPPort)
+	}
+	log.Info("Listen: %v://%s%s", setting.Protocol, listenAddr, setting.AppSubURL)
+
+	if setting.LFS.StartServer {
+		log.Info("LFS server enabled")
+	}
+
 	var err error
 	switch setting.Protocol {
 	case setting.HTTP:
-		err = runHTTP(listenAddr, context2.ClearHandler(m))
+		if handleRedirector {
+			NoHTTPRedirector()
+		}
+		err = runHTTP("tcp", listenAddr, context2.ClearHandler(m))
 	case setting.HTTPS:
 		if setting.EnableLetsEncrypt {
 			err = runLetsEncrypt(listenAddr, setting.Domain, setting.LetsEncryptDirectory, setting.LetsEncryptEmail, context2.ClearHandler(m))
 			break
 		}
-		if setting.RedirectOtherPort {
-			go runHTTPRedirector()
+		if handleRedirector {
+			if setting.RedirectOtherPort {
+				go runHTTPRedirector()
+			} else {
+				NoHTTPRedirector()
+			}
 		}
-		err = runHTTPS(listenAddr, setting.CertFile, setting.KeyFile, context2.ClearHandler(m))
+		err = runHTTPS("tcp", listenAddr, setting.CertFile, setting.KeyFile, context2.ClearHandler(m))
 	case setting.FCGI:
-		listener, err := net.Listen("tcp", listenAddr)
-		if err != nil {
-			log.Fatal("Failed to bind %s: %v", listenAddr, err)
+		if handleRedirector {
+			NoHTTPRedirector()
 		}
-		defer listener.Close()
-		err = fcgi.Serve(listener, context2.ClearHandler(m))
+		err = runFCGI("tcp", listenAddr, context2.ClearHandler(m))
 	case setting.UnixSocket:
-		if err := os.Remove(listenAddr); err != nil && !os.IsNotExist(err) {
-			log.Fatal("Failed to remove unix socket directory %s: %v", listenAddr, err)
+		if handleRedirector {
+			NoHTTPRedirector()
 		}
-		var listener *net.UnixListener
-		listener, err = net.ListenUnix("unix", &net.UnixAddr{Name: listenAddr, Net: "unix"})
-		if err != nil {
-			break // Handle error after switch
+		err = runHTTP("unix", listenAddr, context2.ClearHandler(m))
+	case setting.FCGIUnix:
+		if handleRedirector {
+			NoHTTPRedirector()
 		}
-
-		// FIXME: add proper implementation of signal capture on all protocols
-		// execute this on SIGTERM or SIGINT: listener.Close()
-		if err = os.Chmod(listenAddr, os.FileMode(setting.UnixSocketPermission)); err != nil {
-			log.Fatal("Failed to set permission of unix socket: %v", err)
-		}
-		err = http.Serve(listener, context2.ClearHandler(m))
+		err = runFCGI("unix", listenAddr, context2.ClearHandler(m))
 	default:
 		log.Fatal("Invalid protocol: %s", setting.Protocol)
 	}
 
 	if err != nil {
-		log.Fatal("Failed to start server: %v", err)
+		log.Critical("Failed to start server: %v", err)
 	}
-
-	return nil
+	log.Info("HTTP Listener: %s Closed", listenAddr)
+	return err
 }

@@ -7,11 +7,12 @@ package integrations
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"code.gitea.io/gitea/models"
 	"code.gitea.io/gitea/modules/git"
-	api "code.gitea.io/sdk/gitea"
+	api "code.gitea.io/gitea/modules/structs"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -42,7 +43,7 @@ func createNewReleaseUsingAPI(t *testing.T, session *TestSession, token string, 
 }
 
 func TestAPICreateAndUpdateRelease(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 
 	repo := models.AssertExistsAndLoadBean(t, &models.Repository{ID: 1}).(*models.Repository)
 	owner := models.AssertExistsAndLoadBean(t, &models.User{ID: repo.OwnerID}).(*models.User)
@@ -51,6 +52,7 @@ func TestAPICreateAndUpdateRelease(t *testing.T) {
 
 	gitRepo, err := git.OpenRepository(repo.RepoPath())
 	assert.NoError(t, err)
+	defer gitRepo.Close()
 
 	err = gitRepo.CreateTag("v0.0.1", "master")
 	assert.NoError(t, err)
@@ -92,7 +94,7 @@ func TestAPICreateAndUpdateRelease(t *testing.T) {
 }
 
 func TestAPICreateReleaseToDefaultBranch(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 
 	repo := models.AssertExistsAndLoadBean(t, &models.Repository{ID: 1}).(*models.Repository)
 	owner := models.AssertExistsAndLoadBean(t, &models.User{ID: repo.OwnerID}).(*models.User)
@@ -103,7 +105,7 @@ func TestAPICreateReleaseToDefaultBranch(t *testing.T) {
 }
 
 func TestAPICreateReleaseToDefaultBranchOnExistingTag(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 
 	repo := models.AssertExistsAndLoadBean(t, &models.Repository{ID: 1}).(*models.Repository)
 	owner := models.AssertExistsAndLoadBean(t, &models.User{ID: repo.OwnerID}).(*models.User)
@@ -112,9 +114,43 @@ func TestAPICreateReleaseToDefaultBranchOnExistingTag(t *testing.T) {
 
 	gitRepo, err := git.OpenRepository(repo.RepoPath())
 	assert.NoError(t, err)
+	defer gitRepo.Close()
 
 	err = gitRepo.CreateTag("v0.0.1", "master")
 	assert.NoError(t, err)
 
 	createNewReleaseUsingAPI(t, session, token, owner, repo, "v0.0.1", "", "v0.0.1", "test")
+}
+
+func TestAPIGetReleaseByTag(t *testing.T) {
+	defer prepareTestEnv(t)()
+
+	repo := models.AssertExistsAndLoadBean(t, &models.Repository{ID: 1}).(*models.Repository)
+	owner := models.AssertExistsAndLoadBean(t, &models.User{ID: repo.OwnerID}).(*models.User)
+	session := loginUser(t, owner.LowerName)
+
+	tag := "v1.1"
+
+	urlStr := fmt.Sprintf("/api/v1/repos/%s/%s/releases/tags/%s/",
+		owner.Name, repo.Name, tag)
+
+	req := NewRequestf(t, "GET", urlStr)
+	resp := session.MakeRequest(t, req, http.StatusOK)
+
+	var release *api.Release
+	DecodeJSON(t, resp, &release)
+
+	assert.Equal(t, "testing-release", release.Title)
+
+	nonexistingtag := "nonexistingtag"
+
+	urlStr = fmt.Sprintf("/api/v1/repos/%s/%s/releases/tags/%s/",
+		owner.Name, repo.Name, nonexistingtag)
+
+	req = NewRequestf(t, "GET", urlStr)
+	resp = session.MakeRequest(t, req, http.StatusNotFound)
+
+	var err *api.APIError
+	DecodeJSON(t, resp, &err)
+	assert.True(t, strings.HasPrefix(err.Message, "release tag does not exist"))
 }

@@ -10,17 +10,22 @@ import (
 
 // Tag represents a repository tag
 type Tag struct {
-	Name   string `json:"name"`
-	Commit struct {
-		SHA string `json:"sha"`
-		URL string `json:"url"`
-	} `json:"commit"`
-	ZipballURL string `json:"zipball_url"`
-	TarballURL string `json:"tarball_url"`
+	Name       string      `json:"name"`
+	ID         string      `json:"id"`
+	Commit     *CommitMeta `json:"commit"`
+	ZipballURL string      `json:"zipball_url"`
+	TarballURL string      `json:"tarball_url"`
+}
+
+// ListRepoTagsOptions options for listing a repository's tags
+type ListRepoTagsOptions struct {
+	ListOptions
 }
 
 // ListRepoTags list all the branches of one repository
-func (c *Client) ListRepoTags(user, repo string) ([]*Tag, error) {
-	tags := make([]*Tag, 0, 10)
-	return tags, c.getParsedResponse("GET", fmt.Sprintf("/repos/%s/%s/tags", user, repo), nil, nil, &tags)
+func (c *Client) ListRepoTags(user, repo string, opt ListRepoTagsOptions) ([]*Tag, *Response, error) {
+	opt.setDefaults()
+	tags := make([]*Tag, 0, opt.PageSize)
+	resp, err := c.getParsedResponse("GET", fmt.Sprintf("/repos/%s/%s/tags?%s", user, repo, opt.getURLQuery().Encode()), nil, nil, &tags)
+	return tags, resp, err
 }

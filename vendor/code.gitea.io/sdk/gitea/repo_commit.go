@@ -7,13 +7,14 @@ package gitea
 
 import (
 	"fmt"
+	"net/url"
+	"time"
 )
 
 // Identity for a person's identity like an author or committer
 type Identity struct {
-	Name string `json:"name" binding:"MaxSize(100)"`
-	// swagger:strfmt email
-	Email string `json:"email" binding:"MaxSize(254)"`
+	Name  string `json:"name"`
+	Email string `json:"email"`
 }
 
 // CommitMeta contains meta information of a commit in terms of API.
@@ -47,8 +48,41 @@ type Commit struct {
 	Parents    []*CommitMeta `json:"parents"`
 }
 
+// CommitDateOptions store dates for GIT_AUTHOR_DATE and GIT_COMMITTER_DATE
+type CommitDateOptions struct {
+	Author    time.Time `json:"author"`
+	Committer time.Time `json:"committer"`
+}
+
 // GetSingleCommit returns a single commit
-func (c *Client) GetSingleCommit(user, repo, commitID string) (*Commit, error) {
+func (c *Client) GetSingleCommit(user, repo, commitID string) (*Commit, *Response, error) {
 	commit := new(Commit)
-	return commit, c.getParsedResponse("GET", fmt.Sprintf("/repos/%s/%s/commits/%s", user, repo, commitID), nil, nil, &commit)
+	resp, err := c.getParsedResponse("GET", fmt.Sprintf("/repos/%s/%s/git/commits/%s", user, repo, commitID), nil, nil, &commit)
+	return commit, resp, err
+}
+
+// ListCommitOptions list commit options
+type ListCommitOptions struct {
+	ListOptions
+	//SHA or branch to start listing commits from (usually 'master')
+	SHA string
+}
+
+// QueryEncode turns options into querystring argument
+func (opt *ListCommitOptions) QueryEncode() string {
+	query := opt.ListOptions.getURLQuery()
+	if opt.SHA != "" {
+		query.Add("sha", opt.SHA)
+	}
+	return query.Encode()
+}
+
+// ListRepoCommits return list of commits from a repo
+func (c *Client) ListRepoCommits(user, repo string, opt ListCommitOptions) ([]*Commit, *Response, error) {
+	link, _ := url.Parse(fmt.Sprintf("/repos/%s/%s/commits", user, repo))
+	opt.setDefaults()
+	commits := make([]*Commit, 0, opt.PageSize)
+	link.RawQuery = opt.QueryEncode()
+	resp, err := c.getParsedResponse("GET", link.String(), nil, nil, &commits)
+	return commits, resp, err
 }

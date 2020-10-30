@@ -25,8 +25,12 @@ All global options can be placed at the command level.
 
 - `--help`, `-h`: Show help text and exit. Optional.
 - `--version`, `-v`: Show version and exit. Optional. (example: `Gitea version 1.1.0+218-g7b907ed built with: bindata, sqlite`).
-- `--custom-path path`, `-C path`: Location of the Gitea custom folder. Optional. (default: $PWD/custom).
-- `--config path`, `-c path`: Gitea configuration file path. Optional. (default: custom/conf/app.ini).
+- `--custom-path path`, `-C path`: Location of the Gitea custom folder. Optional. (default: `AppWorkPath`/custom or `$GITEA_CUSTOM`).
+- `--config path`, `-c path`: Gitea configuration file path. Optional. (default: `custom`/conf/app.ini).
+- `--work-path path`, `-w path`: Gitea `AppWorkPath`. Optional. (default: LOCATION_OF_GITEA_BINARY or `$GITEA_WORK_DIR`)
+
+NB: The defaults custom-path, config and work-path can also be
+changed at build time (if preferred).
 
 ### Commands
 
@@ -40,9 +44,9 @@ Starts the server:
 - Examples:
     - `gitea web`
     - `gitea web --port 80`
-    - `gitea web --config /etc/gitea.ini --pid /var/run/gitea.pid`
+    - `gitea web --config /etc/gitea.ini --pid /some/custom/gitea.pid`
 - Notes:
-    - Gitea should not be run as root. To bind to a port below 1000, you can use setcap on
+    - Gitea should not be run as root. To bind to a port below 1024, you can use setcap on
       Linux: `sudo setcap 'cap_net_bind_service=+ep' /path/to/gitea`. This will need to be
       redone every time you update Gitea.
 
@@ -51,27 +55,40 @@ Starts the server:
 Admin operations:
 
 - Commands:
-    - `create-user`
-        - Options:
-            - `--name value`: Username. Required. As of gitea 1.9.0, use the `--username` flag instead.
-            - `--username value`: Username. Required. New in gitea 1.9.0.
-            - `--password value`: Password. Required.
-            - `--email value`: Email. Required.
-            - `--admin`: If provided, this makes the user an admin. Optional.
-            - `--must-change-password`: If provided, the created user will be required to choose a newer password after
+    - `user`:
+        - `list`:
+            - Options:
+                - `--admin`: List only admin users. Optional.
+            - Description: lists all users that exist
+            - Examples:
+                - `gitea admin user list`
+        - `delete`:
+            - Options:
+                - `--id`: ID of user to be deleted. Required.
+            - Examples:
+                - `gitea admin user delete --id 1`
+        - `create`:
+            - Options:
+                - `--name value`: Username. Required. As of gitea 1.9.0, use the `--username` flag instead.
+                - `--username value`: Username. Required. New in gitea 1.9.0.
+                - `--password value`: Password. Required.
+                - `--email value`: Email. Required.
+                - `--admin`: If provided, this makes the user an admin. Optional.
+                - `--access-token`: If provided, an access token will be created for the user. Optional. (default: false).
+                - `--must-change-password`: If provided, the created user will be required to choose a newer password after
 	    the initial login. Optional. (default: true).
-            - ``--random-password``: If provided, a randomly generated password will be used as the password of
+                - ``--random-password``: If provided, a randomly generated password will be used as the password of
 	    the created user. The value of `--password` will be discarded. Optional.
-            - `--random-password-length`: If provided, it will be used to configure the length of the randomly
+                - `--random-password-length`: If provided, it will be used to configure the length of the randomly
 	    generated password. Optional. (default: 12)
-        - Examples:
-            - `gitea admin create-user --username myname --password asecurepassword --email me@example.com`
-    - `change-password`
-        - Options:
-            - `--username value`, `-u value`: Username. Required.
-            - `--password value`, `-p value`: New password. Required.
-        - Examples:
-            - `gitea admin change-password --username myname --password asecurepassword`
+            - Examples:
+                - `gitea admin user create --username myname --password asecurepassword --email me@example.com`
+        - `change-password`:
+            - Options:
+                - `--username value`, `-u value`: Username. Required.
+                - `--password value`, `-p value`: New password. Required.
+            - Examples:
+                - `gitea admin user change-password --username myname --password asecurepassword`
     - `regenerate`
         - Options:
             - `hooks`: Regenerate git-hooks for all repositories
@@ -118,6 +135,98 @@ Admin operations:
                 - `--custom-email-url`: Use a custom Email URL (option for GitHub).
             - Examples:
                 - `gitea admin auth update-oauth --id 1 --name external-github-updated`
+        - `add-ldap`: Add new LDAP (via Bind DN) authentication source
+            - Options:
+                - `--name value`: Authentication name. Required.
+                - `--not-active`: Deactivate the authentication source.
+                - `--security-protocol value`: Security protocol name. Required.
+                - `--skip-tls-verify`: Disable TLS verification.
+                - `--host value`: The address where the LDAP server can be reached. Required.
+                - `--port value`: The port to use when connecting to the LDAP server. Required.
+                - `--user-search-base value`: The LDAP base at which user accounts will be searched for. Required.
+                - `--user-filter value`: An LDAP filter declaring how to find the user record that is attempting to authenticate. Required.
+                - `--admin-filter value`: An LDAP filter specifying if a user should be given administrator privileges.
+                - `--restricted-filter value`: An LDAP filter specifying if a user should be given restricted status.
+                - `--username-attribute value`: The attribute of the user’s LDAP record containing the user name.
+                - `--firstname-attribute value`: The attribute of the user’s LDAP record containing the user’s first name.
+                - `--surname-attribute value`: The attribute of the user’s LDAP record containing the user’s surname.
+                - `--email-attribute value`: The attribute of the user’s LDAP record containing the user’s email address. Required.
+                - `--public-ssh-key-attribute value`: The attribute of the user’s LDAP record containing the user’s public ssh key.
+                - `--bind-dn value`: The DN to bind to the LDAP server with when searching for the user.
+                - `--bind-password value`: The password for the Bind DN, if any.
+                - `--attributes-in-bind`: Fetch attributes in bind DN context.
+                - `--synchronize-users`: Enable user synchronization.
+                - `--page-size value`: Search page size.
+            - Examples:
+                - `gitea admin auth add-ldap --name ldap --security-protocol unencrypted --host mydomain.org --port 389 --user-search-base "ou=Users,dc=mydomain,dc=org" --user-filter "(&(objectClass=posixAccount)(uid=%s))" --email-attribute mail`
+        - `update-ldap`: Update existing LDAP (via Bind DN) authentication source
+            - Options:
+                - `--id value`: ID of authentication source. Required.
+                - `--name value`: Authentication name.
+                - `--not-active`: Deactivate the authentication source.
+                - `--security-protocol value`: Security protocol name.
+                - `--skip-tls-verify`: Disable TLS verification.
+                - `--host value`: The address where the LDAP server can be reached.
+                - `--port value`: The port to use when connecting to the LDAP server.
+                - `--user-search-base value`: The LDAP base at which user accounts will be searched for.
+                - `--user-filter value`: An LDAP filter declaring how to find the user record that is attempting to authenticate.
+                - `--admin-filter value`: An LDAP filter specifying if a user should be given administrator privileges.
+                - `--restricted-filter value`: An LDAP filter specifying if a user should be given restricted status.
+                - `--username-attribute value`: The attribute of the user’s LDAP record containing the user name.
+                - `--firstname-attribute value`: The attribute of the user’s LDAP record containing the user’s first name.
+                - `--surname-attribute value`: The attribute of the user’s LDAP record containing the user’s surname.
+                - `--email-attribute value`: The attribute of the user’s LDAP record containing the user’s email address.
+                - `--public-ssh-key-attribute value`: The attribute of the user’s LDAP record containing the user’s public ssh key.
+                - `--bind-dn value`: The DN to bind to the LDAP server with when searching for the user.
+                - `--bind-password value`: The password for the Bind DN, if any.
+                - `--attributes-in-bind`: Fetch attributes in bind DN context.
+                - `--synchronize-users`: Enable user synchronization.
+                - `--page-size value`: Search page size.
+            - Examples:
+                - `gitea admin auth update-ldap --id 1 --name "my ldap auth source"`
+                - `gitea admin auth update-ldap --id 1 --username-attribute uid --firstname-attribute givenName --surname-attribute sn`
+        - `add-ldap-simple`: Add new LDAP (simple auth) authentication source
+            - Options:
+                - `--name value`: Authentication name. Required.
+                - `--not-active`: Deactivate the authentication source.
+                - `--security-protocol value`: Security protocol name. Required.
+                - `--skip-tls-verify`: Disable TLS verification.
+                - `--host value`: The address where the LDAP server can be reached. Required.
+                - `--port value`: The port to use when connecting to the LDAP server. Required.
+                - `--user-search-base value`: The LDAP base at which user accounts will be searched for.
+                - `--user-filter value`: An LDAP filter declaring how to find the user record that is attempting to authenticate. Required.
+                - `--admin-filter value`: An LDAP filter specifying if a user should be given administrator privileges.
+                - `--restricted-filter value`: An LDAP filter specifying if a user should be given restricted status.
+                - `--username-attribute value`: The attribute of the user’s LDAP record containing the user name.
+                - `--firstname-attribute value`: The attribute of the user’s LDAP record containing the user’s first name.
+                - `--surname-attribute value`: The attribute of the user’s LDAP record containing the user’s surname.
+                - `--email-attribute value`: The attribute of the user’s LDAP record containing the user’s email address. Required.
+                - `--public-ssh-key-attribute value`: The attribute of the user’s LDAP record containing the user’s public ssh key.
+                - `--user-dn value`: The user’s DN. Required.
+            - Examples:
+                - `gitea admin auth add-ldap-simple --name ldap --security-protocol unencrypted --host mydomain.org --port 389 --user-dn "cn=%s,ou=Users,dc=mydomain,dc=org" --user-filter "(&(objectClass=posixAccount)(cn=%s))" --email-attribute mail`
+        - `update-ldap-simple`: Update existing LDAP (simple auth) authentication source
+            - Options:
+                - `--id value`: ID of authentication source. Required.
+                - `--name value`: Authentication name.
+                - `--not-active`: Deactivate the authentication source.
+                - `--security-protocol value`: Security protocol name.
+                - `--skip-tls-verify`: Disable TLS verification.
+                - `--host value`: The address where the LDAP server can be reached.
+                - `--port value`: The port to use when connecting to the LDAP server.
+                - `--user-search-base value`: The LDAP base at which user accounts will be searched for.
+                - `--user-filter value`: An LDAP filter declaring how to find the user record that is attempting to authenticate.
+                - `--admin-filter value`: An LDAP filter specifying if a user should be given administrator privileges.
+                - `--restricted-filter value`: An LDAP filter specifying if a user should be given restricted status.
+                - `--username-attribute value`: The attribute of the user’s LDAP record containing the user name.
+                - `--firstname-attribute value`: The attribute of the user’s LDAP record containing the user’s first name.
+                - `--surname-attribute value`: The attribute of the user’s LDAP record containing the user’s surname.
+                - `--email-attribute value`: The attribute of the user’s LDAP record containing the user’s email address.
+                - `--public-ssh-key-attribute value`: The attribute of the user’s LDAP record containing the user’s public ssh key.
+                - `--user-dn value`: The user’s DN.
+            - Examples:
+                - `gitea admin auth update-ldap-simple --id 1 --name "my ldap auth source"`
+                - `gitea admin auth update-ldap-simple --id 1 --username-attribute uid --firstname-attribute givenName --surname-attribute sn`
 
 #### cert
 
@@ -188,3 +297,148 @@ provided key. You should also set the value
 NB: opensshd requires the gitea program to be owned by root and not
 writable by group or others. The program must be specified by an absolute
 path.
+NB: Gitea must be running for this command to succeed.
+
+#### migrate
+Migrates the database. This command can be used to run other commands before starting the server for the first time.  
+This command is idempotent.
+
+#### convert
+Converts an existing MySQL database from utf8 to utf8mb4.
+
+#### doctor
+Diagnose the problems of current gitea instance according the given configuration.
+Currently there are a check list below:
+
+- Check if OpenSSH authorized_keys file id correct
+When your gitea instance support OpenSSH, your gitea instance binary path will be written to `authorized_keys` 
+when there is any public key added or changed on your gitea instance.
+Sometimes if you moved or renamed your gitea binary when upgrade and you haven't run `Update the '.ssh/authorized_keys' file with Gitea SSH keys. (Not needed for the built-in SSH server.)` on your Admin Panel. Then all pull/push via SSH will not be work.
+This check will help you to check if it works well.
+
+For contributors, if you want to add more checks, you can wrie ad new function like `func(ctx *cli.Context) ([]string, error)` and 
+append it to `doctor.go`.
+
+```go
+var checklist = []check{
+	{
+		title: "Check if OpenSSH authorized_keys file id correct",
+		f:     runDoctorLocationMoved,
+    },
+    // more checks please append here
+}
+```
+
+This function will receive a command line context and return a list of details about the problems or error.
+
+##### doctor recreate-table
+
+Sometimes when there are migrations the old columns and default values may be left
+unchanged in the database schema. This may lead to warning such as:
+
+```
+2020/08/02 11:32:29 ...rm/session_schema.go:360:Sync2() [W] Table user Column keep_activity_private db default is , struct default is 0
+```
+
+You can cause Gitea to recreate these tables and copy the old data into the new table
+with the defaults set appropriately by using:
+
+```
+gitea doctor recreate-table user
+```
+
+You can ask gitea to recreate multiple tables using:
+
+```
+gitea doctor recreate-table table1 table2 ...
+```
+
+And if you would like Gitea to recreate all tables simply call:
+
+```
+gitea doctor recreate-table
+```
+
+It is highly recommended to back-up your database before running these commands.
+
+#### manager
+
+Manage running server operations:
+
+- Commands:
+  - `shutdown`:      Gracefully shutdown the running process
+  - `restart`:       Gracefully restart the running process - (not implemented for windows servers)
+  - `flush-queues`:  Flush queues in the running process
+    - Options:
+      - `--timeout value`: Timeout for the flushing process (default: 1m0s)
+      - `--non-blocking`: Set to true to not wait for flush to complete before returning
+  - `logging`:       Adjust logging commands
+    - Commands:
+      - `pause`:   Pause logging
+        - Notes:
+          - The logging level will be raised to INFO temporarily if it is below this level.
+          - Gitea will buffer logs up to a certain point and will drop them after that point.
+      - `resume`:  Resume logging
+      - `release-and-reopen`: Cause Gitea to release and re-open files and connections used for logging (Equivalent to sending SIGUSR1 to Gitea.)
+      - `remove name`: Remove the named logger
+        - Options:
+          - `--group group`, `-g group`: Set the group to remove the sublogger from. (defaults to `default`)
+      - `add`:     Add a logger
+        - Commands:
+          - `console`: Add a console logger
+            - Options:
+              - `--group value`, `-g value`: Group to add logger to - will default to "default"
+              - `--name value`, `-n value`: Name of the new logger - will default to mode
+              - `--level value`, `-l value`: Logging level for the new logger
+              - `--stacktrace-level value`, `-L value`: Stacktrace logging level
+              - `--flags value`, `-F value`: Flags for the logger
+              - `--expression value`, `-e value`: Matching expression for the logger
+              - `--prefix value`, `-p value`: Prefix for the logger
+              - `--color`: Use color in the logs
+              - `--stderr`: Output console logs to stderr - only relevant for console
+          - `file`: Add a file logger
+            - Options:
+              - `--group value`, `-g value`: Group to add logger to - will default to "default"
+              - `--name value`, `-n value`:  Name of the new logger - will default to mode
+              - `--level value`, `-l value`: Logging level for the new logger
+              - `--stacktrace-level value`, `-L value`: Stacktrace logging level
+              - `--flags value`, `-F value`: Flags for the logger
+              - `--expression value`, `-e value`: Matching expression for the logger
+              - `--prefix value`, `-p value`: Prefix for the logger
+              - `--color`: Use color in the logs
+              - `--filename value`, `-f value`: Filename for the logger - 
+              - `--rotate`, `-r`: Rotate logs
+              - `--max-size value`, `-s value`: Maximum size in bytes before rotation
+              - `--daily`, `-d`: Rotate logs daily
+              - `--max-days value`, `-D value`: Maximum number of daily logs to keep
+              - `--compress`, `-z`: Compress rotated logs
+              - `--compression-level value`, `-Z value`: Compression level to use
+          - `conn`: Add a network connection logger
+            - Options:
+              - `--group value`, `-g value`: Group to add logger to - will default to "default"
+              - `--name value`, `-n value`:  Name of the new logger - will default to mode
+              - `--level value`, `-l value`: Logging level for the new logger
+              - `--stacktrace-level value`, `-L value`: Stacktrace logging level
+              - `--flags value`, `-F value`: Flags for the logger
+              - `--expression value`, `-e value`: Matching expression for the logger
+              - `--prefix value`, `-p value`: Prefix for the logger
+              - `--color`: Use color in the logs
+              - `--reconnect-on-message`, `-R`: Reconnect to host for every message
+              - `--reconnect`, `-r`: Reconnect to host when connection is dropped
+              - `--protocol value`, `-P value`: Set protocol to use: tcp, unix, or udp (defaults to tcp)
+              - `--address value`, `-a value`: Host address and port to connect to (defaults to :7020)
+          - `smtp`: Add an SMTP logger
+            - Options:
+              - `--group value`, `-g value`: Group to add logger to - will default to "default"
+              - `--name value`, `-n value`: Name of the new logger - will default to mode
+              - `--level value`, `-l value`: Logging level for the new logger
+              - `--stacktrace-level value`, `-L value`: Stacktrace logging level
+              - `--flags value`, `-F value`: Flags for the logger
+              - `--expression value`, `-e value`: Matching expression for the logger
+              - `--prefix value`, `-p value`: Prefix for the logger
+              - `--color`: Use color in the logs
+              - `--username value`, `-u value`: Mail server username
+              - `--password value`, `-P value`: Mail server password
+              - `--host value`, `-H value`: Mail server host (defaults to: 127.0.0.1:25)
+              - `--send-to value`, `-s value`: Email address(es) to send to
+              - `--subject value`, `-S value`: Subject header of sent emails

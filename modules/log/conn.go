@@ -67,10 +67,20 @@ func (i *connWriter) connect() error {
 	}
 
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		tcpConn.SetKeepAlive(true)
+		err = tcpConn.SetKeepAlive(true)
+		if err != nil {
+			return err
+		}
 	}
 
 	i.innerWriter = conn
+	return nil
+}
+
+func (i *connWriter) releaseReopen() error {
+	if i.innerWriter != nil {
+		return i.connect()
+	}
 	return nil
 }
 
@@ -114,6 +124,11 @@ func (log *ConnLogger) Flush() {
 // GetName returns the default name for this implementation
 func (log *ConnLogger) GetName() string {
 	return "conn"
+}
+
+// ReleaseReopen causes the ConnLogger to reconnect to the server
+func (log *ConnLogger) ReleaseReopen() error {
+	return log.out.(*connWriter).releaseReopen()
 }
 
 func init() {

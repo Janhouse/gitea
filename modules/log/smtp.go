@@ -11,10 +11,6 @@ import (
 	"strings"
 )
 
-const (
-	subjectPhrase = "Diagnostic message from server"
-)
-
 type smtpWriter struct {
 	owner *SMTPLogger
 }
@@ -99,6 +95,11 @@ func (log *SMTPLogger) sendMail(p []byte) (int, error) {
 
 // Flush when log should be flushed
 func (log *SMTPLogger) Flush() {
+}
+
+// ReleaseReopen does nothing
+func (log *SMTPLogger) ReleaseReopen() error {
+	return nil
 }
 
 // GetName returns the default name for this implementation

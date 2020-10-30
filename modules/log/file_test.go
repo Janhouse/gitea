@@ -14,13 +14,14 @@ import (
 	"testing"
 	"time"
 
+	"code.gitea.io/gitea/modules/util"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestFileLoggerFails(t *testing.T) {
 	tmpDir, err := ioutil.TempDir("", "TestFileLogger")
 	assert.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer util.RemoveAll(tmpDir)
 
 	prefix := "TestPrefix "
 	level := INFO
@@ -48,7 +49,7 @@ func TestFileLoggerFails(t *testing.T) {
 func TestFileLogger(t *testing.T) {
 	tmpDir, err := ioutil.TempDir("", "TestFileLogger")
 	assert.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer util.RemoveAll(tmpDir)
 
 	prefix := "TestPrefix "
 	level := INFO
@@ -103,7 +104,7 @@ func TestFileLogger(t *testing.T) {
 	assert.Equal(t, expected, string(logData))
 
 	event.level = WARN
-	expected = expected + fmt.Sprintf("%s%s %s:%d:%s [%c] %s\n", prefix, dateString, event.filename, event.line, event.caller, strings.ToUpper(event.level.String())[0], event.msg)
+	expected += fmt.Sprintf("%s%s %s:%d:%s [%c] %s\n", prefix, dateString, event.filename, event.line, event.caller, strings.ToUpper(event.level.String())[0], event.msg)
 	fileLogger.LogEvent(&event)
 	fileLogger.Flush()
 	logData, err = ioutil.ReadFile(filename)
@@ -130,7 +131,7 @@ func TestFileLogger(t *testing.T) {
 	err = realFileLogger.DoRotate()
 	assert.Error(t, err)
 
-	expected = expected + fmt.Sprintf("%s%s %s:%d:%s [%c] %s\n", prefix, dateString, event.filename, event.line, event.caller, strings.ToUpper(event.level.String())[0], event.msg)
+	expected += fmt.Sprintf("%s%s %s:%d:%s [%c] %s\n", prefix, dateString, event.filename, event.line, event.caller, strings.ToUpper(event.level.String())[0], event.msg)
 	fileLogger.LogEvent(&event)
 	fileLogger.Flush()
 	logData, err = ioutil.ReadFile(filename)
@@ -138,7 +139,7 @@ func TestFileLogger(t *testing.T) {
 	assert.Equal(t, expected, string(logData))
 
 	// Should fail to rotate
-	expected = expected + fmt.Sprintf("%s%s %s:%d:%s [%c] %s\n", prefix, dateString, event.filename, event.line, event.caller, strings.ToUpper(event.level.String())[0], event.msg)
+	expected += fmt.Sprintf("%s%s %s:%d:%s [%c] %s\n", prefix, dateString, event.filename, event.line, event.caller, strings.ToUpper(event.level.String())[0], event.msg)
 	fileLogger.LogEvent(&event)
 	fileLogger.Flush()
 	logData, err = ioutil.ReadFile(filename)
@@ -151,7 +152,7 @@ func TestFileLogger(t *testing.T) {
 func TestCompressFileLogger(t *testing.T) {
 	tmpDir, err := ioutil.TempDir("", "TestFileLogger")
 	assert.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer util.RemoveAll(tmpDir)
 
 	prefix := "TestPrefix "
 	level := INFO
@@ -188,7 +189,7 @@ func TestCompressFileLogger(t *testing.T) {
 	assert.Equal(t, expected, string(logData))
 
 	event.level = WARN
-	expected = expected + fmt.Sprintf("%s%s %s:%d:%s [%c] %s\n", prefix, dateString, event.filename, event.line, event.caller, strings.ToUpper(event.level.String())[0], event.msg)
+	expected += fmt.Sprintf("%s%s %s:%d:%s [%c] %s\n", prefix, dateString, event.filename, event.line, event.caller, strings.ToUpper(event.level.String())[0], event.msg)
 	fileLogger.LogEvent(&event)
 	fileLogger.Flush()
 	logData, err = ioutil.ReadFile(filename)
@@ -211,7 +212,7 @@ func TestCompressFileLogger(t *testing.T) {
 func TestCompressOldFile(t *testing.T) {
 	tmpDir, err := ioutil.TempDir("", "TestFileLogger")
 	assert.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer util.RemoveAll(tmpDir)
 	fname := filepath.Join(tmpDir, "test")
 	nonGzip := filepath.Join(tmpDir, "test-nonGzip")
 

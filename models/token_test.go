@@ -27,6 +27,42 @@ func TestNewAccessToken(t *testing.T) {
 	assert.Error(t, NewAccessToken(invalidToken))
 }
 
+func TestAccessTokenByNameExists(t *testing.T) {
+
+	name := "Token Gitea"
+
+	assert.NoError(t, PrepareTestDatabase())
+	token := &AccessToken{
+		UID:  3,
+		Name: name,
+	}
+
+	// Check to make sure it doesn't exists already
+	exist, err := AccessTokenByNameExists(token)
+	assert.NoError(t, err)
+	assert.False(t, exist)
+
+	// Save it to the database
+	assert.NoError(t, NewAccessToken(token))
+	AssertExistsAndLoadBean(t, token)
+
+	// This token must be found by name in the DB now
+	exist, err = AccessTokenByNameExists(token)
+	assert.NoError(t, err)
+	assert.True(t, exist)
+
+	user4Token := &AccessToken{
+		UID:  4,
+		Name: name,
+	}
+
+	// Name matches but different user ID, this shouldn't exists in the
+	// database
+	exist, err = AccessTokenByNameExists(user4Token)
+	assert.NoError(t, err)
+	assert.False(t, exist)
+}
+
 func TestGetAccessTokenBySHA(t *testing.T) {
 	assert.NoError(t, PrepareTestDatabase())
 	token, err := GetAccessTokenBySHA("d2c6c1ba3890b309189a8e618c72a162e4efbf36")
@@ -36,18 +72,18 @@ func TestGetAccessTokenBySHA(t *testing.T) {
 	assert.Equal(t, "2b3668e11cb82d3af8c6e4524fc7841297668f5008d1626f0ad3417e9fa39af84c268248b78c481daa7e5dc437784003494f", token.TokenHash)
 	assert.Equal(t, "e4efbf36", token.TokenLastEight)
 
-	token, err = GetAccessTokenBySHA("notahash")
+	_, err = GetAccessTokenBySHA("notahash")
 	assert.Error(t, err)
 	assert.True(t, IsErrAccessTokenNotExist(err))
 
-	token, err = GetAccessTokenBySHA("")
+	_, err = GetAccessTokenBySHA("")
 	assert.Error(t, err)
 	assert.True(t, IsErrAccessTokenEmpty(err))
 }
 
 func TestListAccessTokens(t *testing.T) {
 	assert.NoError(t, PrepareTestDatabase())
-	tokens, err := ListAccessTokens(1)
+	tokens, err := ListAccessTokens(ListAccessTokensOptions{UserID: 1})
 	assert.NoError(t, err)
 	if assert.Len(t, tokens, 2) {
 		assert.Equal(t, int64(1), tokens[0].UID)
@@ -56,14 +92,14 @@ func TestListAccessTokens(t *testing.T) {
 		assert.Contains(t, []string{tokens[0].Name, tokens[1].Name}, "Token B")
 	}
 
-	tokens, err = ListAccessTokens(2)
+	tokens, err = ListAccessTokens(ListAccessTokensOptions{UserID: 2})
 	assert.NoError(t, err)
 	if assert.Len(t, tokens, 1) {
 		assert.Equal(t, int64(2), tokens[0].UID)
 		assert.Equal(t, "Token A", tokens[0].Name)
 	}
 
-	tokens, err = ListAccessTokens(100)
+	tokens, err = ListAccessTokens(ListAccessTokensOptions{UserID: 100})
 	assert.NoError(t, err)
 	assert.Empty(t, tokens)
 }
